@@ -39,6 +39,8 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
+from torch.utils.data import ConcatDataset
+from omegaconf import ListConfig
 
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.dataset import SFTDataset
@@ -574,7 +576,7 @@ def main(config):
 
 
 def create_sft_dataset(data_paths, data_config, tokenizer):
-    """Create a dataset."""
+    """Create a dataset. If a list is passed in, create a concatenated dataset. TODO: add weights as an arg"""
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):
@@ -587,6 +589,16 @@ def create_sft_dataset(data_paths, data_config, tokenizer):
     # Default to single-turn dataset
     else:
         dataset_cls = SFTDataset
+
+    # if data_paths is a list
+    if isinstance(data_paths, ListConfig):
+        data_paths = list(data_paths)
+
+    if isinstance(data_paths, (list, tuple)):
+        sub_datasets = [
+            dataset_cls(parquet_files=path, tokenizer=tokenizer, config=data_config) for path in data_paths
+        ]
+        return ConcatDataset(sub_datasets)
 
     # Create datasets based on the selected class
     dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config)
