@@ -304,7 +304,7 @@ class FSDPSFTTrainer:
         input_ids = batch["input_ids"].to(self.device_name)
         attention_mask = batch["attention_mask"].to(self.device_name)
         position_ids = batch["position_ids"].to(self.device_name)
-        loss_mask = batch.pop("loss_mask")[:, :-1].reshape(-1).to(self.device_name)
+        loss_mask = batch.pop("loss_mask")[:, 1:].reshape(-1).to(self.device_name)
         loss_fct = nn.CrossEntropyLoss(reduction="none")
 
         # Context manager for sequence parallel if needed
@@ -598,10 +598,43 @@ def create_sft_dataset(data_paths, data_config, tokenizer):
         sub_datasets = [
             dataset_cls(parquet_files=path, tokenizer=tokenizer, config=data_config) for path in data_paths
         ]
+
+        # filter each individual dataset
+        if getattr(data_config, "filter_long_sequences", False):
+            from torch.utils.data import Subset
+            print(f"Filtering out sequences longer than {data_config.max_length} tokens (multi datasets)")
+
+            for i, dataset in enumerate(sub_datasets):
+                valid_indices = []
+                for idx in range(len(dataset)):
+                    example = dataset[idx]
+                    seq_len = example["input_ids"].shape[0]
+                    if seq_len <= data_config.max_length:
+                        valid_indices.append(idx)
+
+                if valid_indices:
+                    sub_datasets[i] = Subset(dataset, valid_indices)
+
         return ConcatDataset(sub_datasets)
 
     # Create datasets based on the selected class
     dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config)
+
+    # drop over-length conversations if requested
+    if getattr(data_config, "filter_long_sequences", False):
+        from torch.utils.data import Subset
+        print(f"Filtering out sequences longer than {data_config.max_length} tokens")
+
+        valid_indices = []
+        for idx in range(len(dataset)):
+            example = dataset[idx]
+            seq_len = example["input_ids"].shape[0]
+            if seq_len <= data_config.max_length:
+                valid_indices.append(idx)
+
+        if valid_indices:
+            dataset = Subset(dataset, valid_indices)
+
     return dataset
 
 
