@@ -127,4 +127,6 @@ ENV/
 logs
 log
 outputs
-.history
+.history# Large wheel files
+*.whl
+*.whl.*
