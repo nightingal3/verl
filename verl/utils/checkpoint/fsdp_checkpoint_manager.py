@@ -120,28 +120,40 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             )
 
         # every rank download its own checkpoint
+        # IMPORTANT: For loading, use offload_to_cpu=False when CUDA is available.
+        # The original code had this backwards: offload_to_cpu=True if is_cuda_available
+        # This caused optimizer states to stay on CPU during GPU training, resulting in
+        # expensive CPU<->GPU transfers at every training step (2-3x slowdown).
         state_dict_cfg = (
-            ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
+            ShardedStateDictConfig(offload_to_cpu=False if is_cuda_available else True)
             if self.should_load_model
             else None
         )
         optim_cfg = (
-            ShardedOptimStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
+            ShardedOptimStateDictConfig(offload_to_cpu=False if is_cuda_available else True)
             if self.should_load_optimizer
             else None
         )
+        # Determine map_location for loading tensors
+        # CRITICAL: Load directly to GPU to avoid slow training from CPU<->GPU transfers
+        from verl.utils.device import get_device_name, get_device_id
+        if is_cuda_available:
+            device = f"{get_device_name()}:{get_device_id()}"
+        else:
+            device = "cpu"
+
         with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             if self.should_load_model:
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
-                model_state_dict = torch.load(local_model_path, weights_only=False)
+                model_state_dict = torch.load(local_model_path, map_location=device, weights_only=False)
                 self.model.load_state_dict(model_state_dict)
                 log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
-                optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
+                optimizer_state_dict = torch.load(local_optim_path, map_location=device, weights_only=False)
                 self.optimizer.load_state_dict(optimizer_state_dict)
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
@@ -150,7 +162,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt"
             )
             local_extra_state_path = copy_to_local(remote_extra_state_path)
-            extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
+            # Extra state (lr_scheduler, RNG) can be on CPU since it's not performance-critical
+            extra_state_dict = torch.load(local_extra_state_path, map_location="cpu", weights_only=False)
             # recover random state
             if "rng" in extra_state_dict:
                 # 'rng' may not exist for backward compatibility
